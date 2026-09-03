@@ -24,7 +24,7 @@
 namespace {
 
 constexpr std::uint16_t default_port = 4242;
-constexpr std::uint32_t default_distance = 120;
+constexpr std::uint32_t default_distance = 1200;
 constexpr std::uint8_t trep_version = 1;
 constexpr std::uint8_t trep_route_protocol = 100;
 constexpr int reconnect_seconds = 2;
@@ -32,6 +32,7 @@ constexpr int connect_timeout_ms = 5000;
 constexpr int io_timeout_seconds = 5;
 constexpr int tcp_user_timeout_ms = 10000;
 constexpr int netlink_timeout_seconds = 5;
+constexpr int netlink_dump_attempts = 3;
 constexpr int debounce_ms = 250;
 
 volatile sig_atomic_t stop_requested = 0;
@@ -177,6 +178,33 @@ Address parse_address(const std::string& text) {
     throw std::runtime_error("invalid address: " + text);
 }
 
+std::uint64_t parse_unsigned(
+    const std::string& text,
+    std::uint64_t maximum,
+    const std::string& what) {
+
+    if (
+        text.empty() or
+        text.find_first_not_of("0123456789") != std::string::npos) {
+
+        throw std::runtime_error("bad " + what + ": " + text);
+    }
+
+    std::uint64_t value = 0;
+
+    try {
+        value = std::stoull(text);
+    } catch (const std::exception&) {
+        throw std::runtime_error("bad " + what + ": " + text);
+    }
+
+    if (value > maximum) {
+        throw std::runtime_error("bad " + what + ": " + text);
+    }
+
+    return value;
+}
+
 std::string address_to_string(const Address& address) {
     char buffer[INET6_ADDRSTRLEN] {};
 
@@ -273,11 +301,8 @@ Prefix4 parse_prefix4(const std::string& text) {
         throw std::runtime_error("bad IPv4 prefix: " + text);
     }
 
-    const unsigned length = std::stoul(text.substr(slash + 1));
-
-    if (length > 32) {
-        throw std::runtime_error("bad IPv4 prefix length");
-    }
+    const auto length = parse_unsigned(
+        text.substr(slash + 1), 32, "IPv4 prefix length");
 
     Prefix4 prefix;
     prefix.length = static_cast<std::uint8_t>(length);
@@ -304,11 +329,8 @@ Prefix6 parse_prefix6(const std::string& text) {
         throw std::runtime_error("bad IPv6 prefix: " + text);
     }
 
-    const unsigned length = std::stoul(text.substr(slash + 1));
-
-    if (length > 128) {
-        throw std::runtime_error("bad IPv6 prefix length");
-    }
+    const auto length = parse_unsigned(
+        text.substr(slash + 1), 128, "IPv6 prefix length");
 
     prefix.length = static_cast<std::uint8_t>(length);
     mask_prefix6(prefix.network, prefix.length);
@@ -491,9 +513,15 @@ public:
         std::vector<Prefix4> result;
         std::unordered_set<std::uint64_t> seen;
 
-        dump_routes(
-            AF_INET,
-            [&](const rtmsg& route, const std::uint8_t* data, int length) {
+        bool complete = false;
+
+        for (int attempt = 0; attempt < netlink_dump_attempts; ++attempt) {
+            result.clear();
+            seen.clear();
+
+            complete = dump_routes(
+                AF_INET,
+                [&](const rtmsg& route, const std::uint8_t* data, int length) {
                 if (
                     route.rtm_family != AF_INET or
                     route.rtm_table != RT_TABLE_MAIN or
@@ -535,7 +563,19 @@ public:
                 if (seen.insert(prefix_key(prefix)).second) {
                     result.push_back(prefix);
                 }
-            });
+                });
+
+            if (complete) {
+                break;
+            }
+
+            log_debug("trepd: interrupted IPv4 route dump, retrying");
+        }
+
+        if (not complete) {
+            throw std::runtime_error(
+                "netlink IPv4 route dump repeatedly interrupted");
+        }
 
         for (const Prefix4& prefix : policy.exact_routes) {
             if (seen.insert(prefix_key(prefix)).second) {
@@ -550,9 +590,15 @@ public:
         std::vector<Prefix6> result;
         std::unordered_set<std::string> seen;
 
-        dump_routes(
-            AF_INET6,
-            [&](const rtmsg& route, const std::uint8_t* data, int length) {
+        bool complete = false;
+
+        for (int attempt = 0; attempt < netlink_dump_attempts; ++attempt) {
+            result.clear();
+            seen.clear();
+
+            complete = dump_routes(
+                AF_INET6,
+                [&](const rtmsg& route, const std::uint8_t* data, int length) {
                 if (
                     route.rtm_family != AF_INET6 or
                     route.rtm_table != RT_TABLE_MAIN or
@@ -594,7 +640,19 @@ public:
                 if (seen.insert(prefix_key(prefix)).second) {
                     result.push_back(prefix);
                 }
-            });
+                });
+
+            if (complete) {
+                break;
+            }
+
+            log_debug("trepd: interrupted IPv6 route dump, retrying");
+        }
+
+        if (not complete) {
+            throw std::runtime_error(
+                "netlink IPv6 route dump repeatedly interrupted");
+        }
 
         for (const Prefix6& prefix : policy.exact_routes) {
             if (seen.insert(prefix_key(prefix)).second) {
@@ -612,10 +670,10 @@ public:
             &prefix.network_be,
             sizeof(prefix.network_be),
             RTM_NEWROUTE,
-            NLM_F_REQUEST |
+                NLM_F_REQUEST |
                 NLM_F_ACK |
                 NLM_F_CREATE |
-                NLM_F_REPLACE,
+                NLM_F_EXCL,
             priority);
     }
 
@@ -626,14 +684,14 @@ public:
             &prefix.network,
             sizeof(prefix.network),
             RTM_NEWROUTE,
-            NLM_F_REQUEST |
+                NLM_F_REQUEST |
                 NLM_F_ACK |
                 NLM_F_CREATE |
-                NLM_F_REPLACE,
+                NLM_F_EXCL,
             priority);
     }
 
-    void delete_route(const Prefix4& prefix) {
+    void delete_route(const Prefix4& prefix, std::uint32_t priority) {
         modify_route(
             AF_INET,
             prefix.length,
@@ -641,10 +699,10 @@ public:
             sizeof(prefix.network_be),
             RTM_DELROUTE,
             NLM_F_REQUEST | NLM_F_ACK,
-            0);
+            priority);
     }
 
-    void delete_route(const Prefix6& prefix) {
+    void delete_route(const Prefix6& prefix, std::uint32_t priority) {
         modify_route(
             AF_INET6,
             prefix.length,
@@ -652,7 +710,7 @@ public:
             sizeof(prefix.network),
             RTM_DELROUTE,
             NLM_F_REQUEST | NLM_F_ACK,
-            0);
+            priority);
     }
 
 private:
@@ -838,7 +896,7 @@ private:
     }
 
     template<typename Fn>
-    void dump_routes(int family, Fn&& callback) {
+    bool dump_routes(int family, Fn&& callback) {
         struct Request {
             nlmsghdr header {};
             rtmsg route {};
@@ -855,6 +913,7 @@ private:
         send_netlink(&request, request.header.nlmsg_len);
 
         bool done = false;
+        bool interrupted = false;
 
         while (not done) {
             std::array<std::uint8_t, 16384> buffer {};
@@ -882,6 +941,10 @@ private:
 
                 if (header->nlmsg_seq != sequence_) {
                     continue;
+                }
+
+                if (header->nlmsg_flags & NLM_F_DUMP_INTR) {
+                    interrupted = true;
                 }
 
                 if (header->nlmsg_type == NLMSG_DONE) {
@@ -915,6 +978,8 @@ private:
                     RTM_PAYLOAD(header));
             }
         }
+
+        return not interrupted;
     }
 
     void append_attribute(
@@ -1995,7 +2060,7 @@ private:
     void apply_snapshot() {
         for (auto it = learned4_.begin(); it != learned4_.end();) {
             if (pending4_.find(it->first) == pending4_.end()) {
-                netlink_.delete_route(it->second);
+                netlink_.delete_route(it->second, distance_);
 
                 log_info("trepd: del ", prefix_to_string(it->second));
 
@@ -2007,7 +2072,7 @@ private:
 
         for (auto it = learned6_.begin(); it != learned6_.end();) {
             if (pending6_.find(it->first) == pending6_.end()) {
-                netlink_.delete_route(it->second);
+                netlink_.delete_route(it->second, distance_);
 
                 log_info("trepd: del ", prefix_to_string(it->second));
 
@@ -2053,7 +2118,7 @@ private:
             (void) key;
 
             try {
-                netlink_.delete_route(prefix);
+                netlink_.delete_route(prefix, distance_);
             } catch (...) {
             }
         }
@@ -2062,7 +2127,7 @@ private:
             (void) key;
 
             try {
-                netlink_.delete_route(prefix);
+                netlink_.delete_route(prefix, distance_);
             } catch (...) {
             }
         }
@@ -2133,21 +2198,17 @@ void usage(const char* program) {
 }
 
 std::uint16_t parse_port(const std::string& text) {
-    const unsigned long value = std::stoul(text);
+    const auto value = parse_unsigned(text, 65535, "port");
 
-    if (value == 0 or value > 65535) {
-        throw std::runtime_error("bad port");
+    if (value == 0) {
+        throw std::runtime_error("bad port: " + text);
     }
 
     return static_cast<std::uint16_t>(value);
 }
 
 std::uint32_t parse_distance(const std::string& text) {
-    const unsigned long value = std::stoul(text);
-
-    if (value > 0xffffffffUL) {
-        throw std::runtime_error("bad distance");
-    }
+    const auto value = parse_unsigned(text, 0xffffffffULL, "distance");
 
     return static_cast<std::uint32_t>(value);
 }
