@@ -16,6 +16,10 @@ routes between two hosts, for example, over a `tuntom` tunnel.
 
     g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic trepd.cpp -o trepd
 
+Run the CLI regression tests with:
+
+    ./tests/test_cli.sh
+
 The two-host setup is normally started with:
 
     sudo -E ./mk_router.sh <id> <host|user@host> [options...]
