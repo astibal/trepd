@@ -6,6 +6,12 @@ The lower peer address listens and the higher address connects. Routes received
 from the peer are installed in the local main routing table through the tunnel
 interface.
 
+Use `mk_router.sh` to deploy locally and remotely, compile, and run against each other.
+Router never re-advertises other routes learned from `trepd`.
+
+Motivation was to have a simple, self-deploying, yet automatic means to exchange 
+routes between two hosts, for example, over a `tuntom` tunnel.
+
 ## Build
 
     g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic trepd.cpp -o trepd
