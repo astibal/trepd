@@ -531,10 +531,7 @@ public:
                     return;
                 }
 
-                if (
-                    policy.export_connected and
-                    route_uses_interface(route, data, length)) {
-
+                if (route_uses_interface(route, data, length)) {
                     return;
                 }
 
@@ -615,10 +612,7 @@ public:
                     return;
                 }
 
-                if (
-                    policy.export_connected and
-                    route_uses_interface(route, data, length)) {
-
+                if (route_uses_interface(route, data, length)) {
                     return;
                 }
 
