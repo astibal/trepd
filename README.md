@@ -43,6 +43,9 @@ The outbound route pipeline is:
             v
           TCP peer
 
+With no positive selector, no kernel routes are exported. Use an explicit
+`--to-peer-*` selector or `--to-peer-route*` to choose what to advertise.
+
 ### --to-peer-filter PREFIX
 
 Selects kernel routes contained in PREFIX.

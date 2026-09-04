@@ -851,20 +851,6 @@ private:
             }
         }
 
-        const bool no_positive_selector =
-            policy.exact_routes.empty() and
-            policy.filters.empty() and
-            not policy.export_static and
-            not policy.export_connected;
-
-        if (
-            not accepted and
-            no_positive_selector and
-            prefix.length != 0) {
-
-            accepted = true;
-        }
-
         return accepted;
     }
 
@@ -915,20 +901,6 @@ private:
                     break;
                 }
             }
-        }
-
-        const bool no_positive_selector =
-            policy.exact_routes.empty() and
-            policy.filters.empty() and
-            not policy.export_static and
-            not policy.export_connected;
-
-        if (
-            not accepted and
-            no_positive_selector and
-            prefix.length != 0) {
-
-            accepted = true;
         }
 
         return accepted;
