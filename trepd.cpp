@@ -531,6 +531,13 @@ public:
                     return;
                 }
 
+                if (
+                    policy.export_connected and
+                    route_uses_interface(route, data, length)) {
+
+                    return;
+                }
+
                 Prefix4 prefix;
                 prefix.length = route.rtm_dst_len;
 
@@ -604,6 +611,13 @@ public:
                     route.rtm_table != RT_TABLE_MAIN or
                     route.rtm_type != RTN_UNICAST or
                     route.rtm_protocol == trep_route_protocol) {
+
+                    return;
+                }
+
+                if (
+                    policy.export_connected and
+                    route_uses_interface(route, data, length)) {
 
                     return;
                 }
@@ -714,6 +728,37 @@ public:
     }
 
 private:
+    bool route_uses_interface(
+        const rtmsg& route,
+        const std::uint8_t* data,
+        int length) const {
+
+        if (route.rtm_protocol != RTPROT_KERNEL) {
+            return false;
+        }
+
+        auto* attribute = reinterpret_cast<const rtattr*>(data);
+
+        while (RTA_OK(attribute, length)) {
+            if (
+                attribute->rta_type == RTA_OIF and
+                RTA_PAYLOAD(attribute) >= sizeof(interface_index_)) {
+
+                unsigned output_interface = 0;
+                std::memcpy(
+                    &output_interface,
+                    RTA_DATA(attribute),
+                    sizeof(output_interface));
+
+                return output_interface == interface_index_;
+            }
+
+            attribute = RTA_NEXT(attribute, length);
+        }
+
+        return false;
+    }
+
     bool matches_export_filter(
         const Prefix4& prefix,
         const std::vector<Prefix4>& filters) {
