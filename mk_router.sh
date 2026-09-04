@@ -13,6 +13,7 @@ Example:
 Environment:
   TREP_PORT       TCP port (default: 43000 + id)
   TREP_DISTANCE   Imported route metric; passed as --distance when set
+  TREPD_PREFIX16  IPv4 prefix for tunnel addresses (default: 10.254)
 
 Direction:
   --to-peer-*     Local export policy
@@ -46,8 +47,16 @@ source_file="${script_dir}/trepd.cpp"
 client_if="ut${id}c"
 server_if="ut${id}s"
 
-client_ip="10.254.${id}.1"
-server_ip="10.254.${id}.2"
+trepd_prefix16="${TREPD_PREFIX16:-10.254}"
+
+if ! [[ "$trepd_prefix16" =~  ^([0-9]{1,3})\.([0-9]{1,3})$ ]] ||
+   (( 10#${BASH_REMATCH[1]:-999} > 255 || 10#${BASH_REMATCH[2]:-999} > 255 )); then
+    echo "TREPD_PREFIX16 must contain two IPv4 octets, for example 10.254" >&2
+    exit 1
+fi
+
+client_ip="${trepd_prefix16}.${id}.1"
+server_ip="${trepd_prefix16}.${id}.2"
 
 tcp_port="${TREP_PORT:-$((43000 + id))}"
 
