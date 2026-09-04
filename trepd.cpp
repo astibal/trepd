@@ -60,6 +60,45 @@ void on_signal(int) {
         what + ": " + std::strerror(errno));
 }
 
+class ScopedFd {
+public:
+    explicit ScopedFd(int fd = -1) : fd_(fd) {}
+
+    ~ScopedFd() {
+        reset();
+    }
+
+    ScopedFd(const ScopedFd&) = delete;
+    ScopedFd& operator=(const ScopedFd&) = delete;
+
+    ScopedFd(ScopedFd&& other) noexcept : fd_(other.release()) {}
+
+    ScopedFd& operator=(ScopedFd&& other) noexcept {
+        if (this != &other) {
+            reset(other.release());
+        }
+        return *this;
+    }
+
+    int get() const { return fd_; }
+
+    int release() {
+        const int fd = fd_;
+        fd_ = -1;
+        return fd;
+    }
+
+    void reset(int fd = -1) {
+        if (fd_ >= 0) {
+            ::close(fd_);
+        }
+        fd_ = fd;
+    }
+
+private:
+    int fd_ = -1;
+};
+
 struct Address {
     int family = AF_UNSPEC;
     in_addr ipv4 {};
@@ -413,9 +452,10 @@ public:
     explicit Netlink(unsigned interface_index)
         : interface_index_(interface_index) {
 
-        request_fd_ = ::socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+        ScopedFd request_socket(
+            ::socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE));
 
-        if (request_fd_ < 0) {
+        if (request_socket.get() < 0) {
             fail_errno("netlink socket");
         }
 
@@ -425,7 +465,7 @@ public:
         };
 
         if (::setsockopt(
-                request_fd_,
+                request_socket.get(),
                 SOL_SOCKET,
                 SO_RCVTIMEO,
                 &netlink_timeout,
@@ -435,7 +475,7 @@ public:
         }
 
         if (::setsockopt(
-                request_fd_,
+                request_socket.get(),
                 SOL_SOCKET,
                 SO_SNDTIMEO,
                 &netlink_timeout,
@@ -444,9 +484,10 @@ public:
             fail_errno("netlink SO_SNDTIMEO");
         }
 
-        watch_fd_ = ::socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+        ScopedFd watch_socket(
+            ::socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE));
 
-        if (watch_fd_ < 0) {
+        if (watch_socket.get() < 0) {
             fail_errno("netlink watch socket");
         }
 
@@ -457,12 +498,15 @@ public:
             RTMGRP_IPV6_ROUTE;
 
         if (::bind(
-                watch_fd_,
+                watch_socket.get(),
                 reinterpret_cast<sockaddr*>(&address),
                 sizeof(address)) != 0) {
 
             fail_errno("netlink watch bind");
         }
+
+        request_fd_ = request_socket.release();
+        watch_fd_ = watch_socket.release();
     }
 
     ~Netlink() {
@@ -1175,7 +1219,7 @@ public:
         policy4_(std::move(policy4)),
         policy6_(std::move(policy6)),
         interface_index_(::if_nametoindex(interface_name_.c_str())),
-        netlink_(require_interface_index()) {
+        netlink_(interface_index_) {
 
         const int comparison = compare_addresses(local_, peer_);
 
@@ -1199,10 +1243,6 @@ public:
             " role=", (listener_role_ ? "listen" : "connect"),
             " distance=", distance_);
 
-        if (listener_role_) {
-            open_listener();
-        }
-
         while (not stop_requested) {
             if (listener_role_) {
                 if (not refresh_interface_index()) {
@@ -1212,7 +1252,14 @@ public:
                 }
 
                 if (listen_fd_ < 0) {
-                    open_listener();
+                    try {
+                        open_listener();
+                    } catch (const std::runtime_error& error) {
+                        close_listener();
+                        log_info("trepd: ", error.what(), "; retrying");
+                        ::sleep(reconnect_seconds);
+                        continue;
+                    }
                 }
             }
 
@@ -1234,11 +1281,16 @@ public:
                 log_info("trepd: peer connected");
                 run_session(peer_fd);
 
-            } catch (const std::exception& error) {
+            } catch (const std::runtime_error& error) {
                 std::cerr
                     << "trepd: "
                     << error.what()
                     << "\n";
+
+                if (listener_role_ and peer_fd < 0) {
+                    close_listener();
+                    ::sleep(reconnect_seconds);
+                }
             }
 
             if (peer_fd >= 0) {
@@ -1257,15 +1309,6 @@ public:
     }
 
 private:
-    unsigned require_interface_index() {
-        if (interface_index_ == 0) {
-            throw std::runtime_error(
-                "unknown interface: " + interface_name_);
-        }
-
-        return interface_index_;
-    }
-
     bool refresh_interface_index() {
         const unsigned current_index =
             ::if_nametoindex(interface_name_.c_str());
@@ -1315,21 +1358,21 @@ private:
         }
     }
     void open_listener() {
-        listen_fd_ = ::socket(
+        ScopedFd listener(::socket(
             local_.family,
             SOCK_STREAM,
-            IPPROTO_TCP);
+            IPPROTO_TCP));
 
-        if (listen_fd_ < 0) {
+        if (listener.get() < 0) {
             fail_errno("listener socket");
         }
 
-        log_debug("trepd: listener socket created fd=", listen_fd_);
+        log_debug("trepd: listener socket created fd=", listener.get());
 
         int reuse = 1;
 
         if (::setsockopt(
-                listen_fd_,
+                listener.get(),
                 SOL_SOCKET,
                 SO_REUSEADDR,
                 &reuse,
@@ -1340,7 +1383,7 @@ private:
 
         log_debug("trepd: SO_REUSEADDR enabled");
 
-        bind_to_interface(listen_fd_);
+        bind_to_interface(listener.get());
 
         log_debug("trepd: listener bound to interface ", interface_name_);
 
@@ -1351,7 +1394,7 @@ private:
             address.sin_addr = local_.ipv4;
 
             if (::bind(
-                    listen_fd_,
+                    listener.get(),
                     reinterpret_cast<sockaddr*>(&address),
                     sizeof(address)) != 0) {
 
@@ -1365,7 +1408,7 @@ private:
             int ipv6_only = 1;
 
             ::setsockopt(
-                listen_fd_,
+                listener.get(),
                 IPPROTO_IPV6,
                 IPV6_V6ONLY,
                 &ipv6_only,
@@ -1378,7 +1421,7 @@ private:
             address.sin6_scope_id = interface_index_;
 
             if (::bind(
-                    listen_fd_,
+                    listener.get(),
                     reinterpret_cast<sockaddr*>(&address),
                     sizeof(address)) != 0) {
 
@@ -1390,9 +1433,11 @@ private:
                 "]:", port_);
         }
 
-        if (::listen(listen_fd_, 1) != 0) {
+        if (::listen(listener.get(), 1) != 0) {
             fail_errno("listen");
         }
+
+        listen_fd_ = listener.release();
 
         log_info("trepd: listening");
     }
@@ -1543,16 +1588,16 @@ private:
                 continue;
             }
 
-            const int peer_fd = ::socket(
+            ScopedFd peer_socket(::socket(
                 peer_.family,
                 SOCK_STREAM,
-                IPPROTO_TCP);
+                IPPROTO_TCP));
 
-            if (peer_fd < 0) {
+            if (peer_socket.get() < 0) {
                 fail_errno("connect socket");
             }
 
-            bind_to_interface(peer_fd);
+            bind_to_interface(peer_socket.get());
 
             int result = -1;
 
@@ -1562,11 +1607,10 @@ private:
                 local_address.sin_addr = local_.ipv4;
 
                 if (::bind(
-                        peer_fd,
+                        peer_socket.get(),
                         reinterpret_cast<sockaddr*>(&local_address),
                         sizeof(local_address)) != 0) {
 
-                    ::close(peer_fd);
                     fail_errno("client bind");
                 }
 
@@ -1576,7 +1620,7 @@ private:
                 peer_address.sin_addr = peer_.ipv4;
 
                 result = connect_with_timeout(
-                    peer_fd,
+                    peer_socket.get(),
                     reinterpret_cast<sockaddr*>(&peer_address),
                     sizeof(peer_address));
             } else {
@@ -1586,11 +1630,10 @@ private:
                 local_address.sin6_scope_id = interface_index_;
 
                 if (::bind(
-                        peer_fd,
+                        peer_socket.get(),
                         reinterpret_cast<sockaddr*>(&local_address),
                         sizeof(local_address)) != 0) {
 
-                    ::close(peer_fd);
                     fail_errno("client bind6");
                 }
 
@@ -1601,20 +1644,19 @@ private:
                 peer_address.sin6_scope_id = interface_index_;
 
                 result = connect_with_timeout(
-                    peer_fd,
+                    peer_socket.get(),
                     reinterpret_cast<sockaddr*>(&peer_address),
                     sizeof(peer_address));
             }
 
             if (result) {
-                return peer_fd;
+                return peer_socket.release();
             }
 
             log_debug(
                 "trepd: connect failed: ",
                 std::strerror(errno));
 
-            ::close(peer_fd);
             ::sleep(reconnect_seconds);
         }
 

@@ -182,8 +182,9 @@ The daemon has bounded TCP, netlink, and connect waits. TCP connect timeout is
 5 seconds, TCP send/receive timeout is 5 seconds, TCP user timeout is 10 seconds,
 keepalive starts after 10 seconds idle, and reconnect delay is 2 seconds.
 
-If the tunnel interface disappears, trepd waits for it, refreshes its ifindex,
-and recreates the listener when necessary.
+If the tunnel interface or its configured address is temporarily unavailable,
+including during startup, trepd waits and retries. It refreshes the ifindex and
+recreates the listener when necessary.
 
 Logs from mk_router.sh are:
 
